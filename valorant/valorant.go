@@ -1,39 +1,40 @@
 // Package valorant is the library behind the valorant command line:
-// the HTTP client, request shaping, and the typed data models for valorant.
+// the HTTP client, request shaping, and the typed data models for the
+// valorant-api.com static game data API.
 //
 // The Client here is the spine every command shares. It sets a real
 // User-Agent, paces requests so a busy session stays polite, and retries the
 // transient failures (429 and 5xx) that any public site throws under load.
-// Build your endpoint calls and JSON decoding on top of it.
 package valorant
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to valorant. A real, honest
-// User-Agent is both polite and the thing most likely to keep you unblocked.
-const DefaultUserAgent = "valorant/dev (+https://github.com/tamnd/valorant-cli)"
+// DefaultUserAgent identifies the client to valorant-api.com.
+const DefaultUserAgent = "valorant-cli/0.1 (tamnd87@gmail.com)"
 
-// Host is the site this client talks to, and the host the URI driver in
-// domain.go claims. The scaffold points it at valorant.com; change it once you
-// know the real endpoints you want to read.
-const Host = "valorant.com"
+// Host is the API hostname this client talks to.
+const Host = "valorant-api.com"
 
 // BaseURL is the root every request is built from.
-const BaseURL = "https://" + Host
+const BaseURL = "https://valorant-api.com/v1"
 
-// Client talks to valorant over HTTP.
+// DefaultLanguage is the language tag sent to the API.
+const DefaultLanguage = "en-US"
+
+// Client talks to valorant-api.com over HTTP.
 type Client struct {
 	HTTP      *http.Client
 	UserAgent string
+	Language  string
 	// Rate is the minimum gap between requests. Zero means no pacing.
 	Rate    time.Duration
 	Retries int
@@ -41,20 +42,19 @@ type Client struct {
 	last time.Time
 }
 
-// NewClient returns a Client with sensible defaults: a 30s timeout, a 200ms
-// minimum gap between requests, and five retries on transient errors.
+// NewClient returns a Client with sensible defaults.
 func NewClient() *Client {
 	return &Client{
-		HTTP:      &http.Client{Timeout: 30 * time.Second},
+		HTTP:      &http.Client{Timeout: 15 * time.Second},
 		UserAgent: DefaultUserAgent,
+		Language:  DefaultLanguage,
 		Rate:      200 * time.Millisecond,
-		Retries:   5,
+		Retries:   3,
 	}
 }
 
-// Get fetches url and returns the response body. It paces and retries according
-// to the client's settings. The caller owns nothing extra; the body is read
-// fully and closed here.
+// Get fetches rawURL and returns the response body. It paces and retries
+// according to the client's settings.
 func (c *Client) Get(ctx context.Context, rawURL string) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.Retries; attempt++ {
@@ -84,6 +84,7 @@ func (c *Client) do(ctx context.Context, rawURL string) (body []byte, retry bool
 		return nil, false, err
 	}
 	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -124,110 +125,206 @@ func backoff(attempt int) time.Duration {
 	return d
 }
 
-// Page is the scaffold's one example record: a single page, addressed by the
-// path that names it on valorant.com. It is a stand-in for the typed records you
-// will model from the real valorant endpoints.
-//
-// The kit struct tags make it addressable as a resource URI (see domain.go): ID
-// is the URI id, and Body is the long text `valorant cat` and the Markdown
-// export print. The table tags shape the terminal grid (`-o table`) without
-// touching the JSON: URL is flagged the canonical column the `url` format prints,
-// and Body is hidden from the grid with `table:"-"` because a long preview wrecks
-// a row, though it still rides in `-o json` and `valorant cat`. Swap `-` for
-// `table:"body,truncate"` if you would rather clip it to the terminal width.
-type Page struct {
-	ID    string `json:"id" kit:"id" table:"id"`
-	URL   string `json:"url" table:"url,url"`
-	Title string `json:"title,omitempty" table:"title"`
-	Body  string `json:"body,omitempty" kit:"body" table:"-"`
+// wire envelope for all responses.
+type wireResp[T any] struct {
+	Status int `json:"status"`
+	Data   T   `json:"data"`
 }
 
-// GetPage fetches one page by its path (for example "wiki/Go") and returns it as
-// a record. The scaffold keeps a plain-text preview of the response as the body;
-// replace the parsing with the real fields once you know the endpoint's shape.
-func (c *Client) GetPage(ctx context.Context, path string) (*Page, error) {
-	path = strings.Trim(path, "/")
-	url := BaseURL + "/" + path
-	body, err := c.Get(ctx, url)
+// --- wire types ---
+
+type wireAgent struct {
+	UUID                string `json:"uuid"`
+	DisplayName         string `json:"displayName"`
+	Description         string `json:"description"`
+	IsPlayableCharacter bool   `json:"isPlayableCharacter"`
+	Role                *struct {
+		DisplayName string `json:"displayName"`
+	} `json:"role"`
+	Abilities []struct {
+		Slot        string `json:"slot"`
+		DisplayName string `json:"displayName"`
+	} `json:"abilities"`
+}
+
+type wireWeapon struct {
+	UUID        string `json:"uuid"`
+	DisplayName string `json:"displayName"`
+	ShopData    *struct {
+		Cost     int    `json:"cost"`
+		Category string `json:"category"`
+	} `json:"shopData"`
+	WeaponStats *struct {
+		FireRate          float64 `json:"fireRate"`
+		MagazineSize      int     `json:"magazineSize"`
+		ReloadTimeSeconds float64 `json:"reloadTimeSeconds"`
+	} `json:"weaponStats"`
+}
+
+type wireMap struct {
+	UUID                string `json:"uuid"`
+	DisplayName         string `json:"displayName"`
+	NarrativeDescription string `json:"narrativeDescription"`
+	TacticalDescription string `json:"tacticalDescription"`
+	Coordinates         string `json:"coordinates"`
+}
+
+type wireTierSet struct {
+	Tiers []struct {
+		Tier         int    `json:"tier"`
+		TierName     string `json:"tierName"`
+		DivisionName string `json:"divisionName"`
+	} `json:"tiers"`
+}
+
+// buildURL constructs an API URL with language set.
+func (c *Client) buildURL(path string, extra ...string) string {
+	u, _ := url.Parse(BaseURL + path)
+	q := u.Query()
+	lang := c.Language
+	if lang == "" {
+		lang = DefaultLanguage
+	}
+	q.Set("language", lang)
+	for i := 0; i+1 < len(extra); i += 2 {
+		q.Set(extra[i], extra[i+1])
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// Agents fetches playable agents. If all is true, include non-playable ones too.
+func (c *Client) Agents(ctx context.Context, all bool) ([]*Agent, error) {
+	extra := []string{}
+	if !all {
+		extra = []string{"isPlayableCharacter", "true"}
+	}
+	rawURL := c.buildURL("/agents", extra...)
+	body, err := c.Get(ctx, rawURL)
 	if err != nil {
 		return nil, err
 	}
-	return &Page{ID: path, URL: url, Title: path, Body: pageText(body)}, nil
-}
-
-// PageLinks fetches a page and returns the same-host pages it links to, as page
-// stubs. It shows the member-listing pattern the URI driver relies on: every
-// stub carries enough (an id and a URL) to be addressed and followed on its own.
-func (c *Client) PageLinks(ctx context.Context, path string, limit int) ([]*Page, error) {
-	path = strings.Trim(path, "/")
-	body, err := c.Get(ctx, BaseURL+"/"+path)
-	if err != nil {
-		return nil, err
+	var resp wireResp[[]wireAgent]
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode agents: %w", err)
 	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
-			continue
+	out := make([]*Agent, 0, len(resp.Data))
+	for _, a := range resp.Data {
+		role := ""
+		if a.Role != nil {
+			role = a.Role.DisplayName
 		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
+		abilities := make([]string, 0, len(a.Abilities))
+		for _, ab := range a.Abilities {
+			if ab.DisplayName != "" {
+				abilities = append(abilities, ab.DisplayName)
+			}
 		}
+		out = append(out, &Agent{
+			UUID:        a.UUID,
+			Name:        a.DisplayName,
+			Role:        role,
+			Description: a.Description,
+			Abilities:   strings.Join(abilities, ", "),
+		})
 	}
 	return out, nil
 }
 
-// Search fetches the site's search results for query and returns the matching
-// pages as stubs, the same shape PageLinks emits, so every hit is an addressable
-// valorant.com page URI a host can follow. Like the rest of the scaffold it is a
-// stand-in: it reads the links out of a results page rather than a real search
-// API. Point it at the real endpoint and parse the real result shape once you
-// know it.
-func (c *Client) Search(ctx context.Context, query string, limit int) ([]*Page, error) {
-	body, err := c.Get(ctx, BaseURL+"/search?q="+url.QueryEscape(query))
+// Weapons fetches all weapons. Pass category="" to get all.
+func (c *Client) Weapons(ctx context.Context, category string) ([]*Weapon, error) {
+	rawURL := c.buildURL("/weapons")
+	body, err := c.Get(ctx, rawURL)
 	if err != nil {
 		return nil, err
 	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
+	var resp wireResp[[]wireWeapon]
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode weapons: %w", err)
+	}
+	out := make([]*Weapon, 0, len(resp.Data))
+	for _, w := range resp.Data {
+		cat := ""
+		cost := 0
+		if w.ShopData != nil {
+			cat = w.ShopData.Category
+			cost = w.ShopData.Cost
+		}
+		var fireRate float64
+		var magSize int
+		var reloadTime float64
+		if w.WeaponStats != nil {
+			fireRate = w.WeaponStats.FireRate
+			magSize = w.WeaponStats.MagazineSize
+			reloadTime = w.WeaponStats.ReloadTimeSeconds
+		}
+		if category != "" && !strings.EqualFold(cat, category) {
 			continue
 		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
-		}
+		out = append(out, &Weapon{
+			UUID:       w.UUID,
+			Name:       w.DisplayName,
+			Category:   cat,
+			Cost:       cost,
+			FireRate:   fireRate,
+			MagSize:    magSize,
+			ReloadTime: reloadTime,
+		})
 	}
 	return out, nil
 }
 
-var (
-	hrefRE = regexp.MustCompile(`href="(/[^":#?]+)"`)
-	tagRE  = regexp.MustCompile(`<[^>]+>`)
-)
-
-// linkPaths pulls the relative link targets out of an HTML response, so a list
-// op can turn each into an addressable page stub.
-func linkPaths(body []byte) []string {
-	var out []string
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
-		if p := strings.Trim(string(m[1]), "/"); p != "" {
-			out = append(out, p)
-		}
+// Maps fetches all maps.
+func (c *Client) Maps(ctx context.Context) ([]*Map, error) {
+	rawURL := c.buildURL("/maps")
+	body, err := c.Get(ctx, rawURL)
+	if err != nil {
+		return nil, err
 	}
-	return out
+	var resp wireResp[[]wireMap]
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode maps: %w", err)
+	}
+	out := make([]*Map, 0, len(resp.Data))
+	for _, m := range resp.Data {
+		out = append(out, &Map{
+			UUID:                m.UUID,
+			Name:                m.DisplayName,
+			TacticalDescription: m.TacticalDescription,
+			Coordinates:         m.Coordinates,
+		})
+	}
+	return out, nil
 }
 
-// pageText reduces an HTML response to a short plain-text preview, a stand-in
-// for the typed extract a real endpoint would hand you.
-func pageText(body []byte) string {
-	s := strings.Join(strings.Fields(tagRE.ReplaceAllString(string(body), " ")), " ")
-	if len(s) > 500 {
-		s = s[:500]
+// Ranks fetches competitive rank tiers from the most recent episode.
+func (c *Client) Ranks(ctx context.Context) ([]*Rank, error) {
+	rawURL := c.buildURL("/competitivetiers")
+	body, err := c.Get(ctx, rawURL)
+	if err != nil {
+		return nil, err
 	}
-	return s
+	var resp wireResp[[]wireTierSet]
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode competitivetiers: %w", err)
+	}
+	if len(resp.Data) == 0 {
+		return nil, fmt.Errorf("no competitive tier sets found")
+	}
+	// Use the last (most recent) episode.
+	last := resp.Data[len(resp.Data)-1]
+	out := make([]*Rank, 0, len(last.Tiers))
+	for _, t := range last.Tiers {
+		// Skip placeholder/unused tiers and unranked (tier 0).
+		name := strings.ToLower(t.TierName)
+		if t.TierName == "" || t.Tier == 0 || strings.HasPrefix(name, "unused") {
+			continue
+		}
+		out = append(out, &Rank{
+			Tier:     t.Tier,
+			Name:     t.TierName,
+			Division: t.DivisionName,
+		})
+	}
+	return out, nil
 }

@@ -2,7 +2,6 @@ package valorant
 
 import (
 	"context"
-	"net/url"
 	"strings"
 
 	"github.com/tamnd/any-cli/kit"
@@ -14,22 +13,19 @@ import (
 //
 //	import _ "github.com/tamnd/valorant-cli/valorant"
 //
-// exactly as a database/sql program enables a driver with `import _
-// "github.com/lib/pq"`. The init below registers it; the host then dereferences
-// valorant:// URIs by routing to the operations Register installs. The same
-// Domain also builds the standalone valorant binary (see cli.NewApp), so the
-// binary and a host share one source of truth.
-//
-// This is the scaffold's starting point: one resource type, "page", served by a
-// resolver op and a list op. Add your real types here as you model the site.
+// exactly as a database/sql program enables a driver with
+// `import _ "github.com/lib/pq"`. The init below registers it; the host
+// then dereferences valorant:// URIs by routing to the operations
+// Register installs. The same Domain also builds the standalone valorant
+// binary (see cli.NewApp), so the binary and a host share one source of truth.
 func init() { kit.Register(Domain{}) }
 
 // Domain is the valorant driver. It carries no state; the per-run client is
 // built by the factory Register hands kit.
 type Domain struct{}
 
-// Info describes the scheme, the hostnames a pasted link is matched against, and
-// the identity reused for the binary's help and version.
+// Info describes the scheme, the hostnames a pasted link is matched against,
+// and the identity reused for the binary's help and version.
 func (Domain) Info() kit.DomainInfo {
 	return kit.DomainInfo{
 		Scheme: "valorant",
@@ -39,45 +35,84 @@ func (Domain) Info() kit.DomainInfo {
 			Short:  "A command line for the Valorant API.",
 			Long: `A command line for the Valorant API.
 
-valorant reads public valorant data over plain HTTPS, shapes it into
-clean records, and prints output that pipes into the rest of your tools. No API
-key, nothing to run alongside it.`,
+valorant reads public game data from valorant-api.com over HTTPS, shapes it
+into clean records, and prints output that pipes into the rest of your tools.
+No API key, nothing to run alongside it.`,
 			Site: Host,
 			Repo: "https://github.com/tamnd/valorant-cli",
 		},
 	}
 }
 
-// Register installs the client factory and every operation onto app. A resolver
-// op (Single) names its own record type and answers `ant get`; a List op
-// enumerates a parent resource's members and answers `ant ls`.
+// Agent is a playable agent (character) in VALORANT.
+type Agent struct {
+	UUID        string `kit:"id" json:"uuid" table:"uuid"`
+	Name        string `json:"name" table:"name"`
+	Role        string `json:"role" table:"role"`
+	Description string `json:"description" table:"-"`
+	Abilities   string `json:"abilities" table:"abilities"`
+}
+
+// Weapon is a weapon available in VALORANT.
+type Weapon struct {
+	UUID       string  `kit:"id" json:"uuid" table:"uuid"`
+	Name       string  `json:"name" table:"name"`
+	Category   string  `json:"category" table:"category"`
+	Cost       int     `json:"cost" table:"cost"`
+	FireRate   float64 `json:"fire_rate" table:"fire_rate"`
+	MagSize    int     `json:"mag_size" table:"mag_size"`
+	ReloadTime float64 `json:"reload_time" table:"reload_time"`
+}
+
+// Map is a playable map in VALORANT.
+type Map struct {
+	UUID                string `kit:"id" json:"uuid" table:"uuid"`
+	Name                string `json:"name" table:"name"`
+	TacticalDescription string `json:"tactical_description" table:"tactical_description"`
+	Coordinates         string `json:"coordinates" table:"coordinates"`
+}
+
+// Rank is a competitive rank tier in VALORANT.
+type Rank struct {
+	Tier     int    `kit:"id" json:"tier" table:"tier"`
+	Name     string `json:"name" table:"name"`
+	Division string `json:"division" table:"division"`
+}
+
+// Register installs the client factory and every operation onto app.
 func (Domain) Register(app *kit.App) {
 	app.SetClient(newClient)
 
-	// Resolver op: one record per id, the home of `valorant page` and
-	// `ant get valorant://page/<id>`.
-	kit.Handle(app, kit.OpMeta{Name: "page", Group: "read", Single: true,
-		Summary: "Fetch a page by path or URL", URIType: "page", Resolver: true,
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, getPage)
+	kit.Handle(app, kit.OpMeta{
+		Name:    "agents",
+		Group:   "read",
+		List:    true,
+		Summary: "List playable agents",
+	}, listAgents)
 
-	// List op: members of a page, the home of `valorant links` and `ant ls`.
-	// It emits page stubs, so every listed member is itself an addressable
-	// valorant://page/ URI a host can follow.
-	kit.Handle(app, kit.OpMeta{Name: "links", Group: "read", List: true,
-		Summary: "List the pages a page links to", URIType: "page",
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, listLinks)
+	kit.Handle(app, kit.OpMeta{
+		Name:    "weapons",
+		Group:   "read",
+		List:    true,
+		Summary: "List weapons",
+	}, listWeapons)
 
-	// Search op: a free-text query, the home of `valorant search` and the
-	// search box a host (ant) shows for this domain. A top-level op named "search"
-	// is exactly what kit.Host.Searchable looks for. Like links it emits page
-	// stubs, so a host can follow any hit to its own valorant://page/ URI.
-	kit.Handle(app, kit.OpMeta{Name: "search", Group: "read",
-		Summary: "Search valorant",
-		Args:    []kit.Arg{{Name: "query", Help: "search query"}}}, searchPages)
+	kit.Handle(app, kit.OpMeta{
+		Name:    "maps",
+		Group:   "read",
+		List:    true,
+		Summary: "List maps",
+	}, listMaps)
+
+	kit.Handle(app, kit.OpMeta{
+		Name:    "ranks",
+		Group:   "read",
+		List:    true,
+		Summary: "List competitive rank tiers",
+	}, listRanks)
 }
 
-// newClient builds the client from the host-resolved config, so a host and the
-// standalone binary pace and identify themselves the same way.
+// newClient builds the client from the host-resolved config.
 func newClient(_ context.Context, cfg kit.Config) (any, error) {
 	c := NewClient()
 	if cfg.UserAgent != "" {
@@ -96,105 +131,118 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 }
 
 // --- inputs ---
-//
-// Each handler takes a typed input struct. kit fills the fields from the tags:
-// kit:"arg" is a positional argument, kit:"flag,inherit" binds the framework's
-// shared flag of the same name, and kit:"inject" receives the client newClient
-// builds.
 
-type pageRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
+type agentsIn struct {
+	Role   string  `kit:"flag" help:"filter by role"`
+	All    bool    `kit:"flag" help:"include non-playable characters"`
 	Client *Client `kit:"inject"`
 }
 
-type listRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
-	Limit  int     `kit:"flag,inherit" help:"max results"`
+type weaponsIn struct {
+	Category string  `kit:"flag" help:"filter by category"`
+	Client   *Client `kit:"inject"`
+}
+
+type mapsIn struct {
 	Client *Client `kit:"inject"`
 }
 
-type searchRef struct {
-	Query  string  `kit:"arg" help:"search query"`
-	Limit  int     `kit:"flag,inherit" help:"max results"`
+type ranksIn struct {
 	Client *Client `kit:"inject"`
 }
 
 // --- handlers ---
 
-func getPage(ctx context.Context, in pageRef, emit func(*Page) error) error {
-	p, err := in.Client.GetPage(ctx, pagePath(in.Ref))
+func listAgents(ctx context.Context, in agentsIn, emit func(*Agent) error) error {
+	agents, err := in.Client.Agents(ctx, in.All)
 	if err != nil {
 		return mapErr(err)
 	}
-	return emit(p)
-}
-
-func listLinks(ctx context.Context, in listRef, emit func(*Page) error) error {
-	pages, err := in.Client.PageLinks(ctx, pagePath(in.Ref), in.Limit)
-	if err != nil {
-		return mapErr(err)
-	}
-	for _, p := range pages {
-		if err := emit(p); err != nil {
+	for _, a := range agents {
+		if in.Role != "" && !strings.EqualFold(a.Role, in.Role) {
+			continue
+		}
+		if err := emit(a); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func searchPages(ctx context.Context, in searchRef, emit func(*Page) error) error {
-	pages, err := in.Client.Search(ctx, in.Query, in.Limit)
+func listWeapons(ctx context.Context, in weaponsIn, emit func(*Weapon) error) error {
+	weapons, err := in.Client.Weapons(ctx, in.Category)
 	if err != nil {
 		return mapErr(err)
 	}
-	for _, p := range pages {
-		if err := emit(p); err != nil {
+	for _, w := range weapons {
+		if err := emit(w); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// --- Resolver: the URI-native string functions, pure and network-free ---
+func listMaps(ctx context.Context, in mapsIn, emit func(*Map) error) error {
+	maps, err := in.Client.Maps(ctx)
+	if err != nil {
+		return mapErr(err)
+	}
+	for _, m := range maps {
+		if err := emit(m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-// Classify turns any accepted input — a bare path or a full valorant.com URL —
-// into the canonical (type, id), so `ant resolve` and `ant url` touch no network.
+func listRanks(ctx context.Context, in ranksIn, emit func(*Rank) error) error {
+	ranks, err := in.Client.Ranks(ctx)
+	if err != nil {
+		return mapErr(err)
+	}
+	for _, r := range ranks {
+		if err := emit(r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// --- Resolver: pure, network-free string functions ---
+
+// Classify is required by the kit.Domain interface. Since valorant-api.com
+// URIs are not addressable like web pages (there are no stable resource paths
+// users copy-paste), we return a minimal implementation that at least handles
+// the scheme itself.
 func (Domain) Classify(input string) (uriType, id string, err error) {
-	id = pagePath(input)
-	if id == "" {
-		return "", "", errs.Usage("unrecognized valorant reference: %q", input)
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", "", errs.Usage("empty valorant reference")
 	}
-	return "page", id, nil
+	// Strip valorant:// scheme if present.
+	input = strings.TrimPrefix(input, "valorant://")
+	parts := strings.SplitN(input, "/", 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1], nil
+	}
+	return "agents", input, nil
 }
 
 // Locate is the inverse: the live https URL for a (type, id).
 func (Domain) Locate(uriType, id string) (string, error) {
-	if uriType != "page" {
-		return "", errs.Usage("valorant has no resource type %q", uriType)
+	switch uriType {
+	case "agents":
+		return "https://valorant-api.com/v1/agents/" + id, nil
+	case "weapons":
+		return "https://valorant-api.com/v1/weapons/" + id, nil
+	case "maps":
+		return "https://valorant-api.com/v1/maps/" + id, nil
+	default:
+		return "https://valorant-api.com/v1/" + uriType + "/" + id, nil
 	}
-	return BaseURL + "/" + strings.Trim(id, "/"), nil
 }
 
-// --- helpers ---
-
-// pagePath turns any accepted input into the canonical page id: the path of a
-// full URL on this host, or a bare path with its slashes trimmed.
-func pagePath(input string) string {
-	input = strings.TrimSpace(input)
-	if u, err := url.Parse(input); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-		return strings.Trim(u.Path, "/")
-	}
-	return strings.Trim(input, "/")
-}
-
-// mapErr converts a library error into the kit error kind that carries the right
-// exit code, so a host renders the same outcomes the standalone binary does. As
-// you add sentinel errors to the library, map them here, for example:
-//
-//	case errors.Is(err, ErrNotFound):
-//		return errs.NotFound("%s", err.Error())
-//	case errors.Is(err, ErrRateLimited):
-//		return errs.RateLimited("%s", err.Error())
+// mapErr converts a library error into the appropriate kit error kind.
 func mapErr(err error) error {
 	return err
 }
