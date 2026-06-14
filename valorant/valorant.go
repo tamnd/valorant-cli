@@ -162,11 +162,11 @@ type wireWeapon struct {
 }
 
 type wireMap struct {
-	UUID                string `json:"uuid"`
-	DisplayName         string `json:"displayName"`
+	UUID                 string `json:"uuid"`
+	DisplayName          string `json:"displayName"`
 	NarrativeDescription string `json:"narrativeDescription"`
-	TacticalDescription string `json:"tacticalDescription"`
-	Coordinates         string `json:"coordinates"`
+	TacticalDescription  string `json:"tacticalDescription"`
+	Coordinates          string `json:"coordinates"`
 }
 
 type wireTierSet struct {
